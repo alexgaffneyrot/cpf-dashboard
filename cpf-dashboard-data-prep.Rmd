@@ -1,0 +1,198 @@
+---
+title: "cpf-dashboard"
+author: "Alex Gaffney"
+date: "2025-05-07"
+output: html_document
+---
+
+```{r libraries, include=FALSE, message=FALSE, warning=FALSE}
+library(shiny)
+library(shinydashboard)
+library(readxl)
+library(data.table)
+library(plotly)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(stringr)
+```
+
+# Read in data
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+cpf_data_2023_4 <- read_excel("/Users/AGaffney/Documents/CFP excel/CPF Study Data 2023_copy_2025_April.xlsx", sheet = "2023-24")
+cpf_data_2025 <- read_excel("/Users/AGaffney/Documents/CFP excel/CPF Study Data 2023_copy_2025_April.xlsx", sheet = "2025")
+cpf_data <- rbind(cpf_data_2023_4,cpf_data_2025)
+cpf_data <- as.data.table(cpf_data)
+```
+
+# Explore
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+# Consent 'Yes' but no consent month or year
+cpf_data[Consent == "Yes" & (is.na(`Consent Month`)| is.na(`Consent Year`)),]
+```
+
+# Tidy data
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+cpf_data <- cpf_data %>%
+  mutate(
+    `Consent Month` = factor(`Consent Month`, levels = month.abb),
+    Consent = as.factor(Consent),
+    `HRCP Diagnosis Date` = as.Date(`HRCP Diagnosis Date`),
+    `CP Diagnosis Date` = as.Date(`CP Diagnosis Date`)
+  )
+```
+
+# Time to consent
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+## Calculating the time in months from birth to consent
+cpf_data[, dob_month := month(DOB)]
+cpf_data[, dob_year := year(DOB)]
+cpf_data[, consent_month := match(`Consent Month`, month.abb)]
+cpf_data[, dob_date := make_date(year = dob_year, month = dob_month, day = 1)]
+cpf_data[, consent_date := make_date(year = `Consent Year`, month = consent_month, day = 1)]
+
+## Calculate time difference in months
+cpf_data[, diff_months := interval(dob_date, consent_date) %/% months(1)]
+
+## Boxplot for time to consent from birth date
+consent_boxplot <- ggplot(cpf_data, aes(x = factor(`Consent Year`), y = diff_months)) +
+  geom_boxplot(fill = "skyblue", color = "darkblue") +
+  labs(
+    title = "Age at Consent (in Months) by Consent Year",
+    x = "Consent Year",
+    y = "Age at Consent (Months)"
+  ) +
+  theme_minimal() +
+  coord_flip()
+```
+
+# GMA breakdown
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+cpf_data <- cpf_data %>%
+  mutate(
+    GMA_Writhing_clean = case_when(
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "pr.*cs|cs.*pr|pr/cs") ~ "PR/CS",
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "\\bpr\\+\\b|pr\\+|\\+pr") ~ "PR+",
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "poor rep|\\bpr\\b") ~ "PR",
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "cramped|^cs") ~ "CS",
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "normal") ~ "Normal",
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "^n\\b|n jan|n feb|n march|n april|n may|n june|n july|n aug|n sept|n oct|n nov|n dec") ~ "Normal",
+      str_detect(tolower(trimws(`GMA-Writhing age`)), "dna|unable to complete|missed") ~ "Incomplete",
+      TRUE ~ tolower(trimws(`GMA-Writhing age`))  # keep original cleaned value if unmatched
+    )
+  )
+
+cpf_data$GMA_Writhing_clean <- factor(cpf_data$GMA_Writhing_clean)
+
+#levels(as.factor(cpf_data$GMA_Writhing_clean))
+
+gma_breakdown <- cpf_data %>%
+  filter(!is.na(GMA_Writhing_clean)) %>%
+  group_by(GMA_Writhing_clean) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Percent = (Count / sum(Count)) * 100)
+
+# Create a ggplot with percentage labels
+gma_breakdown_p <-
+  ggplot(gma_breakdown,
+         aes(
+           x = GMA_Writhing_clean,
+           y = Count,
+           fill = GMA_Writhing_clean,
+           text = paste0(
+             "GMA: ",
+             GMA_Writhing_clean,
+             "<br>Count: ",
+             Count,
+             "<br>Percent: ",
+             round(Percent, 1),
+             "%"
+           )
+         )) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "GMA-Writhing age", fill = "GMA-Writhing age")
+```
+
+
+# Consent breakdown
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+# Prepare the data with percentage calculation
+total_consent_breakdown <- cpf_data %>%
+  filter(!is.na(Consent)) %>%
+  group_by(Consent) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Percent = (Count / sum(Count)) * 100)
+
+# Create a ggplot with percentage labels
+total_consent_breakdown_p <-
+  ggplot(total_consent_breakdown,
+         aes(
+           x = Consent,
+           y = Count,
+           fill = Consent,
+           text = paste0(
+             "Consent: ",
+             Consent,
+             "<br>Count: ",
+             Count,
+             "<br>Percent: ",
+             round(Percent, 1),
+             "%"
+           )
+         )) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Timeline HRCP to CP
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+# Prepare the data
+timeline_data <- cpf_data %>%
+  filter(!is.na(`HRCP Diagnosis Date`) | !is.na(`CP Diagnosis Date`)) %>%
+  mutate(
+    MRN = as.factor(MRN),
+    HRCP_Label = if_else(!is.na(`HRCP Diagnosis Date`), format(`HRCP Diagnosis Date`, "%d/%m/%Y"), NA_character_),
+    CP_Label = if_else(!is.na(`CP Diagnosis Date`), format(`CP Diagnosis Date`, "%d/%m/%Y"), NA_character_),
+    tooltip_segment = paste0(
+      "HRCP: ", HRCP_Label, "<br>",
+      "CP: ", CP_Label, "<br>"
+    ),
+    tooltip_hrcp = paste0("HRCP Diagnosis: ", HRCP_Label),
+    tooltip_cp = paste0("CP Diagnosis: ", CP_Label)
+  )
+
+# Plot
+hrcpcp_timeline <- ggplot() +
+  geom_segment(
+    data = timeline_data %>% filter(!is.na(`HRCP Diagnosis Date`) & !is.na(`CP Diagnosis Date`)),
+    aes(
+      x = `HRCP Diagnosis Date`,
+      xend = `CP Diagnosis Date`,
+      y = MRN,
+      yend = MRN,
+      text = tooltip_segment
+    ),
+    color = "steelblue",
+    size = 1
+  ) +
+  geom_point(
+    data = timeline_data %>% filter(!is.na(`HRCP Diagnosis Date`)),
+    aes(x = `HRCP Diagnosis Date`, y = MRN, text = tooltip_hrcp),
+    color = "green",
+    size = 3
+  ) +
+  geom_point(
+    data = timeline_data %>% filter(!is.na(`CP Diagnosis Date`)),
+    aes(x = `CP Diagnosis Date`, y = MRN, text = tooltip_cp),
+    color = "red",
+    size = 3
+  ) +
+  labs(
+    title = "Timeline: HRCP to CP Diagnosis",
+    x = "Date"
+  ) +
+  theme_minimal()
+```
